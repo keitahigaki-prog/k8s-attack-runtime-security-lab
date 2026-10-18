@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: load-generator
+  namespace: lab
+  labels:
+    app: load-generator
+spec:
+  nodeSelector:
+    lab-role: victim
+  containers:
+    - name: load
+      image: alpine:3.19
+      # Bounded: exactly 5000 execve calls total, then exit. No infinite loop.
+      # Resource limits are mandatory here after Lab 21's incident (see chapter 11).
+      command: ["sh", "-c", "i=0; while [ $i -lt 100 ]; do for j in $(seq 1 50); do /bin/true & done; wait; i=$((i+1)); done; echo LOAD_DONE"]
+      resources:
+        limits:
+          cpu: "1"
+          memory: "128Mi"
+        requests:
+          cpu: "500m"
+          memory: "64Mi"
