@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vulnerable-webapp-src
+  namespace: lab
+data:
+  app.py: |
+    import os
+    import subprocess
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import urlparse, parse_qs
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            if parsed.path == "/ping":
+                qs = parse_qs(parsed.query)
+                host = qs.get("host", ["127.0.0.1"])[0]
+                # VULNERABLE: unsanitized input passed straight to a shell.
+                # This is intentional for Lab 1 (Initial Access / T1190).
+                cmd = "ping -c 1 " + host
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                body = (result.stdout + result.stderr).encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"vulnerable-webapp ok\n")
+
+    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vulnerable-webapp
+  namespace: lab
+  labels:
+    app: vulnerable-webapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vulnerable-webapp
+  template:
+    metadata:
+      labels:
+        app: vulnerable-webapp
+    spec:
+      nodeSelector:
+        lab-role: victim
+      containers:
+        - name: app
+          image: python:3.12-alpine
+          command: ["python3", "/app/app.py"]
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: src
+              mountPath: /app
+      volumes:
+        - name: src
+          configMap:
+            name: vulnerable-webapp-src
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vulnerable-webapp
+  namespace: lab
+spec:
+  selector:
+    app: vulnerable-webapp
+  ports:
+    - port: 80
+      targetPort: 8080
