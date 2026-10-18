@@ -1,0 +1,82 @@
+# チューニング本ラボ：正常業務ワークロード（workloads/10-noise-workloads.yaml）向けの調整。
+# 方針: ルールは消さず、upstream の調整用フック（user_known_* マクロ／リスト）か exceptions で
+# 「誰が・どこで・何を」を最小単位で除外する。各ブロックの先頭に対象ワークロードと理由を書く。
+# Falco 0.45.0 / falco_rules.yaml 同梱版で検証。
+
+# --- N1: config-reloader の API サーバー接続 ---------------------------------
+# 除外単位: namespace × ServiceAccount 相当（pod ラベル app）× イメージ × プロセス名
+- rule: Contact K8S API Server From Container
+  exceptions:
+    - name: apps_config_reloader
+      fields: [k8s.ns.name, "k8s.pod.label[app]", container.image.repository, proc.name]
+      values:
+        - [apps, config-reloader, docker.io/curlimages/curl, curl]
+  override:
+    exceptions: append
+
+# --- N2b: config-render の yq ダウンロード実行 ---------------------------------
+# 除外単位: namespace × イメージ × 実行ファイルのパス（名前ではなくパスで縛る）
+- rule: Drop and execute new binary in container
+  exceptions:
+    - name: apps_config_render_yq
+      fields: [k8s.ns.name, container.image.repository, proc.exepath]
+      values:
+        - [apps, docker.io/library/alpine, /usr/local/bin/yq]
+  override:
+    exceptions: append
+
+# --- N3b: uptime-checker の ping ----------------------------------------------
+# upstream が用意した調整用マクロを置き換える。ping 以外の dup は引き続き検知する。
+- macro: user_known_stand_streams_redirect_activities
+  condition: >
+    (k8s.ns.name = "ops"
+     and k8s.pod.label[app] = "uptime-checker"
+     and proc.name = "ping"
+     and proc.pname = "sh")
+
+# --- N4: password-expiry-audit の /etc/shadow 読み取り --------------------------
+- rule: Read sensitive file untrusted
+  exceptions:
+    - name: ops_password_expiry_audit
+      fields: [k8s.ns.name, "k8s.pod.label[batch.kubernetes.io/job-name]", proc.name, fd.name]
+      comps: ["=", startswith, "=", "="]
+      values:
+        - [ops, password-expiry-audit-, awk, /etc/shadow]
+  override:
+    exceptions: append
+
+# --- N5: secret-leak-check の grep --------------------------------------------
+# upstream にフックが無いので exceptions を足す。cmdline 全体で縛り、検索対象の変更も検知に戻す。
+- rule: Search Private Keys or Passwords
+  exceptions:
+    - name: ops_secret_leak_check
+      fields: [k8s.ns.name, proc.name, proc.cmdline]
+      values:
+        - [ops, grep, 'grep -rl BEGIN RSA PRIVATE KEY /artifacts']
+  override:
+    exceptions: append
+
+# --- N6: legacy-app のログ切り詰め ---------------------------------------------
+# upstream のプレースホルダ（allowed_clear_log_files）を、ファイル単位で置き換える。
+- macro: allowed_clear_log_files
+  condition: >
+    (k8s.ns.name = "apps"
+     and k8s.pod.label[app] = "legacy-app"
+     and fd.name = "/var/log/access.log")
+
+# --- N7: netshoot での SRE 調査 -----------------------------------------------
+# Terminal shell は「監査として残す」判断で、ルールは触らず priority だけ下げる。
+- rule: Terminal shell in container
+  priority: INFORMATIONAL
+  override:
+    priority: replace
+
+# tcpdump はツールボックスに限って許可する（他のコンテナの tcpdump は検知）
+- rule: Packet socket created in container
+  exceptions:
+    - name: ops_netshoot_tcpdump
+      fields: [k8s.ns.name, container.image.repository, proc.name]
+      values:
+        - [ops, docker.io/nicolaka/netshoot, tcpdump]
+  override:
+    exceptions: append
