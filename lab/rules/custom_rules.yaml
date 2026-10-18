@@ -129,6 +129,20 @@
   priority: CRITICAL
   tags: [mitre_persistence, T1053]
 
+# Lab 16: no standard rule exists for the cloud instance metadata endpoint
+# either (grep -i "169.254.169.254\|metadata" only matches an *allowlisted*
+# GKE image name, gke-metadata-server, which is the opposite of detection).
+- rule: Contact Cloud Metadata Service From Container
+  desc: A container attempted to connect to the cloud instance metadata IP
+  condition: >
+    evt.type=connect and evt.dir=< and (fd.typechar=4 or fd.typechar=6)
+    and fd.sip="169.254.169.254"
+  output: >
+    Contact cloud metadata service from container (command=%proc.name
+    connection=%fd.name container=%container.name pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: CRITICAL
+  tags: [mitre_credential_access, T1552.005]
+
 - rule: Outbound Connection to C2 Server
   desc: Outbound connection to a known malicious / C2 IP address
   condition: >
