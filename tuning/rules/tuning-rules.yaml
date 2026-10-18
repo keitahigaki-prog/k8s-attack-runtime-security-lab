@@ -27,12 +27,19 @@
 
 # --- N3b: uptime-checker の ping ----------------------------------------------
 # upstream が用意した調整用マクロを置き換える。ping 以外の dup は引き続き検知する。
+#
+# 実測メモ: 当初 proc.pname = "sh" を条件に含めていたが、短命な ping プロセスでは
+# proc.pname（親プロセス名のキャッシュ）の解決が間に合わず <NA> になることがあり、
+# その場合は条件を満たさず例外が効かなかった。これは N6 の k8s.ns.name と同じ「メタデータ
+# 解決の race」で、しかも upstream 自身が container_entrypoint マクロで
+# `not proc.pname exists or proc.pname in (...)` と「存在しないことも正当な一致」として
+# 扱っている前例がある。同じ考え方で、ここでも「存在しない」を許容する。
 - macro: user_known_stand_streams_redirect_activities
   condition: >
     (k8s.ns.name = "ops"
      and k8s.pod.label[app] = "uptime-checker"
      and proc.name = "ping"
-     and proc.pname = "sh")
+     and (not proc.pname exists or proc.pname = "sh"))
 
 # --- N4: password-expiry-audit の /etc/shadow 読み取り --------------------------
 - rule: Read sensitive file untrusted
@@ -58,11 +65,17 @@
 
 # --- N6: legacy-app のログ切り詰め ---------------------------------------------
 # upstream のプレースホルダ（allowed_clear_log_files）を、ファイル単位で置き換える。
+#
+# 実測メモ: 当初は k8s.ns.name / k8s.pod.label[app] をキーにしていたが、Pod再起動直後の
+# 短命プロセスでコンテナ・K8sメタデータの解決が間に合わず k8s.ns.name が <NA> になるケースを
+# 観測し、例外が効かずルールが発火した（container_name=host として記録される）。
+# namespace/label はメタデータ解決に依存するため、ここでは依存しない fd.name を主キーにする。
+# トレードオフ: この race では container.image.repository も同時に空になっていたため、
+# イメージで絞り込んでも救えない。結果として「このパスへの書き込みは丸ごと許可」という、
+# 本来より広い例外になる。パスを他のワークロードと衝突しないよう十分に具体的にすることで
+# 埋め合わせる（本番では emptyDir のパスにワークロード名を含める、等）。
 - macro: allowed_clear_log_files
-  condition: >
-    (k8s.ns.name = "apps"
-     and k8s.pod.label[app] = "legacy-app"
-     and fd.name = "/var/log/access.log")
+  condition: (fd.name = "/var/log/access.log")
 
 # --- N7: netshoot での SRE 調査 -----------------------------------------------
 # Terminal shell は「監査として残す」判断で、ルールは触らず priority だけ下げる。

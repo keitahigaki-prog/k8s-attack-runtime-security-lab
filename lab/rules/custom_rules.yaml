@@ -53,6 +53,70 @@
   priority: CRITICAL
   tags: [mitre_execution, T1620]
 
+# Lab 10: empirically, the stock ruleset has NO rule at all for "a host
+# binary was overwritten from inside a container" (verified: no rule name
+# containing "binary dir" or similar exists in falco_rules.yaml 0.45.0).
+# This is a real coverage gap, not a configuration mistake on our part.
+#
+# First attempt at a fix matched on an fd.name prefix of "/host/..." (our
+# hostPath mount point), but that never fired. Root cause: once the process
+# runs `chroot /host`, its root changes, so Falco reports fd.name as the
+# path *inside the new root* (e.g. "/usr/bin/true"), not the pre-chroot
+# "/host/usr/bin/true". The rule below matches on the post-chroot absolute
+# path instead, which is also what a real CVE-2019-5736-style escape would
+# produce (no /host prefix at all, since there's no bind mount involved).
+- rule: Write to System Binary Directory
+  desc: A file under a system binary directory was opened for writing
+  condition: >
+    open_write and container
+    and (fd.name startswith /usr/bin or fd.name startswith /usr/sbin
+         or fd.name startswith /bin or fd.name startswith /sbin)
+  output: >
+    Write to system binary directory (file=%fd.name command=%proc.cmdline
+    container=%container.name pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: CRITICAL
+  tags: [mitre_defense_evasion, T1611]
+
+# Lab 11: another invented rule name ("Read Environ of Other Process" does
+# not exist in falco_rules.yaml 0.45.0 either -- verified via grep -i environ).
+#
+# First version fired ~1000 times/minute: Falco itself reads every host
+# process's /proc/<pid>/environ via its own /host/proc mount as part of its
+# normal process enrichment. "container" alone doesn't exclude it, because
+# Falco's own pod is also a container. Excluding proc.name=falco and paths
+# under /host/proc (Falco's own enrichment path, vs. the container's native
+# /proc/<pid> path when it shares the host PID namespace) removes the noise.
+- rule: Read Proc Environ by PID
+  desc: A process's /proc/<pid>/environ was read by numeric PID (as opposed to /proc/self), the shape of hostPID cross-process inspection
+  condition: >
+    open_read and container
+    and fd.name contains "/proc/" and fd.name contains "/environ"
+    and not fd.name contains "self"
+    and not fd.name startswith "/host/proc"
+    and proc.name != falco
+  output: >
+    Read /proc/<pid>/environ (file=%fd.name command=%proc.cmdline
+    container=%container.name pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: WARNING
+  tags: [mitre_privilege_escalation, T1611]
+
+# Lab 12: same gap as Lab 10 -- no standard rule watches for persistence
+# writes under /etc/cron.d, /etc/crontab, or systemd unit directories.
+# cron_binaries is only used as an *exception* list elsewhere (to avoid
+# alerting when cron itself spawns a job), not as a detection target.
+- rule: Scheduled Task File Modified
+  desc: A file under a cron/scheduled-task directory was opened for writing
+  condition: >
+    open_write and container
+    and (fd.name startswith /etc/cron.d or fd.name startswith /etc/cron.daily
+         or fd.name startswith /etc/cron.hourly or fd.name=/etc/crontab
+         or fd.name startswith /etc/systemd/system)
+  output: >
+    Scheduled task file modified (file=%fd.name command=%proc.cmdline
+    container=%container.name pod=%k8s.pod.name ns=%k8s.ns.name)
+  priority: CRITICAL
+  tags: [mitre_persistence, T1053]
+
 - rule: Outbound Connection to C2 Server
   desc: Outbound connection to a known malicious / C2 IP address
   condition: >
