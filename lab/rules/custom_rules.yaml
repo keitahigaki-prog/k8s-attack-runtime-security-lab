@@ -17,12 +17,24 @@
     (MITRE T1190) executed via fork/exec rather than an interactive
     "kubectl exec -it" session, which the default "Terminal shell in
     container" rule misses because it requires a tty.
+  # NOTE (empirical finding, Lab 14): an earlier version of this condition
+  # added "and container_entrypoint" on the theory that proc.pname is
+  # always unresolved (<NA>) for this kind of fork/exec. That held for
+  # Lab 1/5/6's vulnerable-webapp container, but NOT for Lab 14's
+  # debug-service container -- there, Falco's process cache had already
+  # resolved proc.pname=python3 by the time the request came in, which
+  # made container_entrypoint evaluate to false and silently dropped the
+  # detection. Whether the parent process name resolves at all turned out
+  # to depend on unpredictable process-cache timing, not on the attack
+  # itself -- so a rule built on top of it is not reliable. Dropping
+  # container_entrypoint trades a bit of precision (it will also catch
+  # legitimate non-interactive automation that spawns a shell) for much
+  # more reliable recall.
   condition: >
     spawned_process
     and container
     and shell_procs
     and proc.tty=0
-    and container_entrypoint
   output: >
     Shell spawned without a tty (user=%user.name container=%container.name
     process=%proc.name command=%proc.cmdline pod=%k8s.pod.name ns=%k8s.ns.name)

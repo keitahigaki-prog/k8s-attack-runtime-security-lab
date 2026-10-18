@@ -28,16 +28,22 @@
 # --- N3b: uptime-checker の ping ----------------------------------------------
 # upstream が用意した調整用マクロを置き換える。ping 以外の dup は引き続き検知する。
 #
-# 実測メモ: 当初 proc.pname = "sh" を条件に含めていたが、短命な ping プロセスでは
+# 実測メモ1: 当初 proc.pname = "sh" を条件に含めていたが、短命な ping プロセスでは
 # proc.pname（親プロセス名のキャッシュ）の解決が間に合わず <NA> になることがあり、
 # その場合は条件を満たさず例外が効かなかった。これは N6 の k8s.ns.name と同じ「メタデータ
 # 解決の race」で、しかも upstream 自身が container_entrypoint マクロで
 # `not proc.pname exists or proc.pname in (...)` と「存在しないことも正当な一致」として
 # 扱っている前例がある。同じ考え方で、ここでも「存在しない」を許容する。
+#
+# 実測メモ2: proc.pname を直しても発火が続いたため確認したところ、今度は
+# k8s.pod.label[app] が <NA> だった。同じイベントで k8s.pod.name はちゃんと
+# "uptime-checker-..." に解決されている。つまり「pod のラベル」は「pod の名前」より
+# 解決が遅れる／失敗しやすい、別系統のキャッシュらしい。例外のキーには
+# k8s.pod.label よりも k8s.pod.name（startswith）を使うほうが安定する。
 - macro: user_known_stand_streams_redirect_activities
   condition: >
     (k8s.ns.name = "ops"
-     and k8s.pod.label[app] = "uptime-checker"
+     and k8s.pod.name startswith "uptime-checker-"
      and proc.name = "ping"
      and (not proc.pname exists or proc.pname = "sh"))
 

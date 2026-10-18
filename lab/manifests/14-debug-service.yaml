@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: debug-service-src
+  namespace: lab
+data:
+  app.py: |
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            # Simulates an unauthenticated debug/notebook-style endpoint that
+            # accepts arbitrary code execution (e.g. an exposed Jupyter kernel).
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode(errors="ignore")
+            import subprocess
+            result = subprocess.run(body, shell=True, capture_output=True, text=True)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write((result.stdout + result.stderr).encode())
+    HTTPServer(("0.0.0.0", 8888), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: debug-service
+  namespace: lab
+  labels:
+    app: debug-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: debug-service
+  template:
+    metadata:
+      labels:
+        app: debug-service
+    spec:
+      nodeSelector:
+        lab-role: lateral-target
+      containers:
+        - name: app
+          image: python:3.12-alpine
+          command: ["python3", "/app/app.py"]
+          ports:
+            - containerPort: 8888
+          volumeMounts:
+            - name: src
+              mountPath: /app
+      volumes:
+        - name: src
+          configMap:
+            name: debug-service-src
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: debug-service
+  namespace: lab
+spec:
+  selector:
+    app: debug-service
+  ports:
+    - port: 8888
+      targetPort: 8888
