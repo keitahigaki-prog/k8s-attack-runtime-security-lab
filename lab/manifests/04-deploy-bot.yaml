@@ -4,6 +4,12 @@ metadata:
   name: deploy-bot
   namespace: lab
 ---
+# Deliberately over-privileged CI service account, built up in two steps
+# across the book: Lab 4 (chapter 4) only needed secrets get/list to show
+# a leaked-token Secret dump. Lab 15 (chapter 8) adds pods/exec on top of
+# that, to demonstrate node-to-node lateral movement with the same stolen
+# token. Both permissions are included here so this manifest reflects the
+# final state used from Lab 15 onward.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -12,6 +18,9 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
