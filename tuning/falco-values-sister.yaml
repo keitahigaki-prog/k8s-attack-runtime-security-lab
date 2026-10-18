@@ -1,0 +1,70 @@
+customRules:
+  rules-lab.yaml: |
+    #
+    # Custom rules developed empirically while validating this book's labs
+    # against a real Falco 0.45 deployment (modern_ebpf driver).
+    #
+
+    # Fix for Lab 1: the default "Terminal shell in container" rule requires
+    # proc.tty != 0, so it never fires for a shell spawned programmatically by a
+    # web server process (no attached terminal). Empirically, proc.pname is also
+    # often <NA> for this kind of short-lived fork/exec (Falco's process-state
+    # cache hadn't resolved the parent), which is exactly why container_entrypoint
+    # treats "pname doesn't exist" as a legitimate match -- so we reuse that
+    # macro instead of trying to match the parent process name directly.
+    - rule: Shell Spawned Without TTY
+      desc: >
+        A shell was spawned inside a container without an attached terminal.
+        This is the realistic shape of a command injection in a web application
+        (MITRE T1190) executed via fork/exec rather than an interactive
+        "kubectl exec -it" session, which the default "Terminal shell in
+        container" rule misses because it requires a tty.
+      condition: >
+        spawned_process
+        and container
+        and shell_procs
+        and proc.tty=0
+        and container_entrypoint
+      output: >
+        Shell spawned without a tty (user=%user.name container=%container.name
+        process=%proc.name command=%proc.cmdline pod=%k8s.pod.name ns=%k8s.ns.name)
+      priority: CRITICAL
+      tags: [mitre_initial_access, T1190]
+
+    # Lab 2: outbound connection to a known malicious / C2 IP.
+    #
+    # NOTE (empirical finding): the stock "outbound" macro in falco_rules.yaml
+    # excludes RFC1918 private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+    # on the assumption that private IPs are always "internal/trusted". Our
+    # in-cluster C2 simulator sits on a ClusterIP (10.96.99.99), which falls
+    # inside 10.0.0.0/8 -- so a rule built on top of "outbound" never fires for
+    # it. This is a real, non-obvious gap: a C2 relay placed anywhere inside the
+    # cluster's own private address space is invisible to any rule that reuses
+    # that macro. We bypass it here by matching evt.type=connect directly.
+    - list: known_malicious_ips
+      items: [10.96.99.99]
+
+    - rule: Fileless Execution via memfd_create
+      desc: A process was executed directly from an anonymous memfd, with no backing file on disk
+      condition: >
+        evt.type=execve
+        and (proc.exepath startswith "/proc/self/fd/" or proc.exepath contains "memfd:")
+      output: >
+        Fileless execution detected (command=%proc.cmdline exe=%proc.exepath
+        parent=%proc.pname container=%container.name pod=%k8s.pod.name ns=%k8s.ns.name)
+      priority: CRITICAL
+      tags: [mitre_execution, T1620]
+
+    - rule: Outbound Connection to C2 Server
+      desc: Outbound connection to a known malicious / C2 IP address
+      condition: >
+        evt.type=connect and evt.dir=< and (fd.typechar=4 or fd.typechar=6)
+        and fd.sip in (known_malicious_ips)
+      output: >
+        Outbound connection to C2 server (command=%proc.name connection=%fd.name
+        container=%container.name pod=%k8s.pod.name ns=%k8s.ns.name)
+      priority: CRITICAL
+      tags: [mitre_initial_access, T1071]
+driver:
+  kind: modern_ebpf
+tty: true

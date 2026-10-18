@@ -1,0 +1,283 @@
+# 正常業務ワークロード（ノイズ源）。
+# 各ワークロードの先頭コメントに「踏むと想定する upstream ルール」を書く。実測結果は ../results/ に記録する。
+
+# N1: 設定リローダー（自作コントローラ）
+# ConfigMap を定期的に API サーバーから取得する。オペレータ／コントローラによくある形。
+# 想定ルール: Contact K8S API Server From Container
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: config-reloader
+  namespace: apps
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: configmap-reader
+  namespace: apps
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: config-reloader
+  namespace: apps
+subjects:
+  - kind: ServiceAccount
+    name: config-reloader
+    namespace: apps
+roleRef:
+  kind: Role
+  name: configmap-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: config-reloader
+  namespace: apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: config-reloader}
+  template:
+    metadata:
+      labels: {app: config-reloader}
+    spec:
+      serviceAccountName: config-reloader
+      containers:
+        - name: reloader
+          image: curlimages/curl:8.10.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              SA=/var/run/secrets/kubernetes.io/serviceaccount
+              while true; do
+                curl -s --cacert $SA/ca.crt -H "Authorization: Bearer $(cat $SA/token)" \
+                  https://kubernetes.default.svc.cluster.local/api/v1/namespaces/apps/configmaps >/dev/null
+                sleep 60
+              done
+---
+# N2: 起動時に依存を入れる Python アプリ
+# イメージに含まれないコマンド（pip が置く gunicorn）を起動時に実行する。
+# 想定ルール: Drop and execute new binary in container（→ 実測では発火しない。下のメモ参照）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-api
+  namespace: apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web-api}
+  template:
+    metadata:
+      labels: {app: web-api}
+    spec:
+      containers:
+        - name: api
+          image: python:3.12-alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --quiet --no-cache-dir gunicorn==23.0.0
+              printf 'def app(e, s):\n    s("200 OK", [])\n    return [b"ok"]\n' > /srv/app.py
+              cd /srv && exec gunicorn --bind 0.0.0.0:8000 app:app
+          ports:
+            - containerPort: 8000
+---
+# 実測メモ: gunicorn は pip が置く Python スクリプトなので、execve されるのはベースイメージの
+# python3.12 になり proc.is_exe_upper_layer=false。web-api は Drop and execute を発火させない。
+---
+# N2b: 起動時にツールの静的バイナリを取ってくるジョブ
+# 設定ファイル変換のために yq をダウンロードして実行する。イメージに無い ELF が実行される。
+# 想定ルール: Drop and execute new binary in container
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: config-render
+  namespace: apps
+spec:
+  schedule: "*/3 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: render
+              image: alpine:3.20
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+                  wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_${ARCH}
+                  chmod +x /usr/local/bin/yq
+                  echo 'replicas: 3' | yq '.replicas'
+---
+# N3: 軽量ヘルスエンドポイント（socat）
+# 実測メモ: socat の SYSTEM: はデフォルトで socketpair 経由で子プロセスにつなぐため、
+# dup される fd は unix ソケットになり Redirect STDOUT/STDIN ルールは発火しない。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: health-responder
+  namespace: apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: health-responder}
+  template:
+    metadata:
+      labels: {app: health-responder}
+    spec:
+      containers:
+        - name: socat
+          image: alpine/socat:1.8.0.0
+          args: ["TCP-LISTEN:8080,fork,reuseaddr", "SYSTEM:echo HTTP/1.0 200 OK; echo; echo ok"]
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: health-responder
+  namespace: apps
+spec:
+  selector: {app: health-responder}
+  ports:
+    - port: 8080
+---
+# N3b: 外形監視（HTTP チェック＋ ping による疎通確認）
+# busybox の ping は raw ソケットを fd 0 に移す（dup3）ため、ping するだけで発火する。
+# 想定ルール: Redirect STDOUT/STDIN to Network Connection in Container
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uptime-checker
+  namespace: ops
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: uptime-checker}
+  template:
+    metadata:
+      labels: {app: uptime-checker}
+    spec:
+      containers:
+        - name: checker
+          image: curlimages/curl:8.10.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                curl -s http://health-responder.apps.svc:8080/ >/dev/null
+                ping -c 1 -W 1 "$(awk '/nameserver/ {print $2; exit}' /etc/resolv.conf)" >/dev/null
+                sleep 60
+              done
+---
+# N4: パスワード有効期限チェック（コンプライアンスジョブ）
+# /etc/shadow を awk で読んで期限切れアカウントを数える。
+# 想定ルール: Read sensitive file untrusted
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: password-expiry-audit
+  namespace: ops
+spec:
+  schedule: "*/2 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: audit
+              image: alpine:3.20
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  awk -F: '$5 != "" {n++} END {print "accounts with max-age:", n+0}' /etc/shadow
+---
+# N5: シークレット混入チェック（CI 的なジョブ）
+# 成果物ディレクトリに秘密鍵が紛れていないかを grep で確認する。
+# 想定ルール: Search Private Keys or Passwords
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: secret-leak-check
+  namespace: ops
+spec:
+  schedule: "*/2 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: check
+              image: alpine:3.20
+              command: ["/bin/sh", "-c"]
+              args:
+                - mkdir -p /artifacts && grep -rl "BEGIN RSA PRIVATE KEY" /artifacts || echo "no keys found"
+---
+# N6: アプリログのローテーション
+# 自前の簡易ローテーションで /var/log 配下のログを切り詰める。
+# 想定ルール: Clear Log Activities
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legacy-app
+  namespace: apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: legacy-app}
+  template:
+    metadata:
+      labels: {app: legacy-app}
+    spec:
+      containers:
+        - name: app
+          image: alpine:3.20
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                for i in $(seq 1 20); do echo "$(date) GET /index.html 200" >> /var/log/access.log; done
+                cp /var/log/access.log /var/log/access.log.1
+                # 実測メモ: `truncate -s 0` は ftruncate で切り詰めるため O_TRUNC が立たず、
+                # Clear Log Activities は発火しない。シェルのリダイレクトは O_TRUNC 付きで open するので発火する。
+                : > /var/log/access.log
+                sleep 90
+              done
+---
+# N7: ネットワーク調査用ツールボックス（SRE が kubectl exec -it で入る）
+# 想定ルール: Terminal shell in container / Packet socket created in container
+# 操作は ../scripts/sre-debug-session.sh で再現する。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netshoot
+  namespace: ops
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: netshoot}
+  template:
+    metadata:
+      labels: {app: netshoot}
+    spec:
+      containers:
+        - name: netshoot
+          image: nicolaka/netshoot:v0.13
+          command: ["sleep", "infinity"]

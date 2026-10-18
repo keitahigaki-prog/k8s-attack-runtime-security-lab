@@ -1,0 +1,9 @@
+# チューニングラボ用 Falco 設定。攻撃本ラボと同じ chart 9.2.0 / Falco 0.45.0 / modern_ebpf。
+# 分析しやすいよう JSON 出力を有効にする。カスタムルールは rules/ から --set-file で渡す。
+driver:
+  kind: modern_ebpf
+tty: true
+falco:
+  json_output: true
+  json_include_output_property: true
+  json_include_tags_property: true

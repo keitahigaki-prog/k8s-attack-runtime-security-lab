@@ -1,0 +1,10 @@
+# チューニング本（falco-rule-tuning-guide）用ラボ。
+# 攻撃本のラボ（kind/kind-config.yaml）と同じ kind / Falco バージョンを使い、
+# メモリ節約のため単一ノードで動かす。
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: tuning-lab
+nodes:
+  - role: control-plane
+    labels:
+      lab-role: "tuning"

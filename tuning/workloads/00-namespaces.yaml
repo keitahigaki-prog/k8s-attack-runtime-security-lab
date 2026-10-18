@@ -1,0 +1,15 @@
+# チューニングラボ：正常業務ワークロード用の namespace。
+# ここに置くものはすべて「攻撃ではない、しかし Falco upstream ルールを踏む」挙動を再現する。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps
+  labels:
+    lab: tuning
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ops
+  labels:
+    lab: tuning

@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: attacker-listener
+  namespace: attacker-infra
+spec:
+  clusterIP: 10.96.66.66
+  selector:
+    app: attacker-listener
+  ports:
+    - port: 4444
+      targetPort: 4444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: attacker-listener
+  namespace: attacker-infra
+  labels:
+    app: attacker-listener
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: attacker-listener
+  template:
+    metadata:
+      labels:
+        app: attacker-listener
+    spec:
+      containers:
+        - name: listener
+          image: busybox:1.36
+          command: ["sh", "-c", "while true; do nc -lk -p 4444 -vv; done"]
+          ports:
+            - containerPort: 4444
